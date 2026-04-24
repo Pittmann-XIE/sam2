@@ -1,96 +1,63 @@
-import os
-import cv2
 import h5py
-import argparse
 import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
 
-def main(args):
-    filepath = os.path.join(args.dataset_folder, args.episode)
-    
-    if not os.path.exists(filepath):
-        print(f"Error: File not found at {filepath}")
-        return
+def visualize_h5_masks(file_path, frame_idx=0):
+    # Open the HDF5 file
+    with h5py.File(file_path, 'r') as f:
+        images_grp = f['observations/images']
+        
+        # Define the cameras we want to visualize
+        cameras = ['cam1', 'cam2', 'cam3']
+        num_frames = images_grp['cam1_rgb'].shape[0]
 
-    with h5py.File(filepath, 'r') as h5f:
-        # 1. Identify all cropped datasets for the specified camera
-        base_path = 'observations/images'
-        if base_path not in h5f:
-            print(f"Error: '{base_path}' not found in {args.episode}")
-            return
-            
-        all_keys = h5f[base_path].keys()
-        prefix = f"{args.camera}_cropped_"
-        cropped_keys = [k for k in all_keys if k.startswith(prefix)]
-        
-        if not cropped_keys:
-            print(f"No cropped datasets found for camera '{args.camera}' in {args.episode}.")
-            print(f"Available keys in {base_path}: {list(all_keys)}")
-            return
-            
-        print(f"Found {len(cropped_keys)} tracked object(s) for {args.camera}.")
-        
-        # 2. Load all crop arrays into memory
-        # They are small (224x224), so loading all frames to RAM is fast and allows smooth scrubbing
-        crops_data = {}
-        for key in sorted(cropped_keys):
-            obj_id = key.split('_')[-1]
-            crops_data[obj_id] = h5f[f"{base_path}/{key}"][:]
-            
-        # Get the total number of frames from the first object
-        num_frames = len(list(crops_data.values())[0])
-        
-        # 3. Setup OpenCV Window and Trackbar
-        window_name = f"Cropped Viewer | {args.episode} -> {args.camera} | Press 'Q' to quit"
-        cv2.namedWindow(window_name)
-        
-        def update_frame(val):
-            """Callback function triggered whenever the slider moves."""
-            frame_idx = val
-            display_images = []
-            
-            for obj_id, crop_array in crops_data.items():
-                # Extract frame and convert RGB (HDF5) to BGR (OpenCV)
-                img = crop_array[frame_idx]
-                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+        plt.subplots_adjust(bottom=0.15)
+
+        def update_plots(idx):
+            for i, cam in enumerate(cameras):
+                # 1. Original RGB
+                rgb = images_grp[f'{cam}_rgb'][idx]
                 
-                # Add a text label to identify the object ID
-                cv2.putText(
-                    img_bgr, 
-                    f"Obj {obj_id}", 
-                    (10, 25), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.8, 
-                    (0, 255, 0), 
-                    2
-                )
-                display_images.append(img_bgr)
-            
-            # Stitch all cropped images side-by-side horizontally
-            combined_img = np.hstack(display_images)
-            cv2.imshow(window_name, combined_img)
+                # 2. Mask 1 Overlay
+                mask1 = images_grp[f'{cam}_rgb_1_mask'][idx]
+                # 3. Mask 2 Overlay
+                mask2 = images_grp[f'{cam}_rgb_2_mask'][idx]
 
-        # Create the slider (trackbar)
-        cv2.createTrackbar("Frame", window_name, 0, num_frames - 1, update_frame)
-        
-        # Initialize the window with the first frame
-        update_frame(0)
-        
-        print(f"Showing {num_frames} frames. Scrub the slider to navigate.")
-        print("Press 'q' or 'ESC' in the image window to close.")
-        
-        # 4. Wait for user to exit
-        while True:
-            key = cv2.waitKey(1) & 0xFF
-            if key in [ord('q'), 27]: # 27 is the ESC key
-                break
+                # Plotting
+                axes[i, 0].imshow(rgb)
+                axes[i, 0].set_title(f'{cam} RGB')
                 
-    cv2.destroyAllWindows()
+                # Mask 1 visualization (Green overlay)
+                axes[i, 1].imshow(rgb)
+                axes[i, 1].imshow(mask1, alpha=0.5, cmap='Greens')
+                axes[i, 1].set_title(f'{cam} Mask 1')
+
+                # Mask 2 visualization (Red overlay)
+                axes[i, 2].imshow(rgb)
+                axes[i, 2].imshow(mask2, alpha=0.5, cmap='Reds')
+                axes[i, 2].set_title(f'{cam} Mask 2')
+
+                for ax in axes[i]:
+                    ax.axis('off')
+            
+            fig.suptitle(f"Frame {idx} / {num_frames - 1}", fontsize=16)
+            fig.canvas.draw_idle()
+
+        # Initial plot
+        update_plots(frame_idx)
+
+        # Add a slider for frame navigation
+        ax_slider = plt.axes([0.2, 0.05, 0.6, 0.03])
+        slider = Slider(ax_slider, 'Frame', 0, num_frames - 1, valinit=frame_idx, valfmt='%d')
+
+        def on_change(val):
+            update_plots(int(val))
+
+        slider.on_changed(on_change)
+        plt.show()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Scrub through generated HDF5 crops")
-    parser.add_argument("--episode", type=str, default='episode_10.hdf5', help="Specific episode file (e.g., episode_52.hdf5)")
-    parser.add_argument("--camera", type=str, default='top', help="Specific camera (e.g., cam1_rgb)")
-    parser.add_argument("--dataset_folder", type=str, default='/mnt/Ego2Exo/sim_transfer_cube_scripted/', help="Path to the HDF5 dataset folder")
-    
-    args = parser.parse_args()
-    main(args)
+    h5_path = '/mnt/Ego2Exo/line_rotate_scripted_distractors_trimmed/episode_0.h5'
+    visualize_h5_masks(h5_path)

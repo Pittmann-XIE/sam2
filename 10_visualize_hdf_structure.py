@@ -11,7 +11,7 @@ def print_hdf5_structure(name, obj):
         print(f"{indent}Dataset: {name} (shape: {obj.shape}, type: {obj.dtype})")
 
 # Replace 'your_file.h5' with your actual file path
-file_path = '/mnt/Ego2Exo/sim_transfer_cube_scripted/episode_5.hdf5'
+file_path = '/mnt/Ego2Exo/line_rotate_scripted_distractors_trimmed/episode_5.h5'
 
 with h5py.File(file_path, 'r') as f:
     print(f"Structure of {file_path}:")
