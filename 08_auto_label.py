@@ -1,4 +1,4 @@
-# ## 08_auto_label.py
+# # V1: save cropped images and masks into hdf5
 # import os
 # import cv2
 # import h5py
@@ -191,7 +191,7 @@
     
     
 
-## extract and save masks
+## V2: extract and save masks
 import os
 import cv2
 import h5py
