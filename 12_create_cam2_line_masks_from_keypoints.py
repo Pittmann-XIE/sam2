@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Interactively create cam2 object/container filled region masks for every .h5 file in a folder.
+Interactively create one shared cam2 object/container filled region mask file.
 
-For each file, the script opens one reference frame from cam2, lets the user
-place ordered keypoints for two masks, fills each mask polygon, and writes:
+Because cam2 is fixed, the script opens one reference episode, lets the user
+place ordered keypoints for two masks, fills each mask polygon, and writes one
+shared cam2_line_masks.h5 containing:
 
     observations/images/cam2_rgb_aug_object_mask
     observations/images/cam2_rgb_aug_container_mask
@@ -13,14 +14,15 @@ If that dataset is missing, the script falls back to observations/images/cam2_rg
 
 Usage:
     python3 sam2/12_create_cam2_line_masks_from_keypoints.py \
-        --folder /mnt/Ego2Exo/your_dataset_folder
+        --folder /mnt/Ego2Exo/your_dataset_folder \
+        --overwrite
 
 Controls in the annotation window:
     left click       add keypoint
     backspace/delete undo last keypoint
     enter           accept current mask
     c               clear current mask
-    escape          skip current file
+    escape          abort without writing
 """
 
 import argparse
@@ -45,13 +47,6 @@ IMAGE_DATASET = "observations/images/cam2_rgb_aug"
 FALLBACK_IMAGE_DATASET = "observations/images/cam2_rgb"
 OBJECT_MASK_DATASET = "observations/images/cam2_rgb_aug_object_mask"
 CONTAINER_MASK_DATASET = "observations/images/cam2_rgb_aug_container_mask"
-
-
-def list_h5_files(folder):
-    folder_path = Path(folder).expanduser()
-    if not folder_path.exists():
-        raise FileNotFoundError(f"Folder does not exist: {folder_path}")
-    return sorted(folder_path.glob("*.h5"))
 
 
 def normalize_image_for_display(image):
@@ -230,20 +225,7 @@ def rasterize_points(points, height, width, line_thickness, close_path):
     return mask
 
 
-def expand_mask_to_image_shape(mask_2d, image_dataset):
-    if image_dataset.ndim == 4:
-        return np.repeat(mask_2d[np.newaxis, :, :], image_dataset.shape[0], axis=0)
-    return mask_2d
-
-
-def write_mask_dataset(root, dataset_name, mask, overwrite, compression):
-    if dataset_name in root:
-        if not overwrite:
-            raise ValueError(
-                f"Dataset already exists: {dataset_name}. Use --overwrite to replace it."
-            )
-        del root[dataset_name]
-
+def write_mask_dataset(root, dataset_name, mask, compression):
     parent_name, leaf_name = dataset_name.rsplit("/", 1)
     parent = root.require_group(parent_name)
     parent.create_dataset(
@@ -254,29 +236,19 @@ def write_mask_dataset(root, dataset_name, mask, overwrite, compression):
     )
 
 
-def assert_outputs_can_be_written(root, dataset_names, overwrite):
-    if overwrite:
-        return
-    existing_names = [name for name in dataset_names if name in root]
-    if existing_names:
-        joined_names = ", ".join(existing_names)
-        raise ValueError(f"Output dataset already exists: {joined_names}. Use --overwrite.")
-
-
-def annotate_file(file_path, args):
-    print(f"\nOpening {file_path}")
-    with h5py.File(file_path, "r+") as root:
+def create_shared_cam2_mask_file(reference_episode_path, output_path, args):
+    print(f"\nOpening reference episode {reference_episode_path}")
+    with h5py.File(reference_episode_path, "r") as root:
         selected_image_dataset = select_image_dataset(
             root,
             args.image_dataset,
             args.fallback_image_dataset,
         )
         if selected_image_dataset is None:
-            print(
-                "  Skipping: missing image dataset "
+            raise KeyError(
+                "Missing image dataset "
                 f"{args.image_dataset} and fallback {args.fallback_image_dataset}"
             )
-            return False
 
         image_dataset = root[selected_image_dataset]
         reference_image, actual_frame = get_reference_frame(image_dataset, args.frame_index)
@@ -289,21 +261,21 @@ def annotate_file(file_path, args):
         object_points = collect_keypoints(
             reference_image,
             "object",
-            file_path,
+            reference_episode_path,
             args.close_path,
         )
         if object_points is None:
-            print("  File skipped before writing object/container masks.")
+            print("  Aborted before writing object/container masks.")
             return False
 
         container_points = collect_keypoints(
             reference_image,
             "container",
-            file_path,
+            reference_episode_path,
             args.close_path,
         )
         if container_points is None:
-            print("  File skipped before writing object/container masks.")
+            print("  Aborted before writing object/container masks.")
             return False
 
         object_mask = rasterize_points(
@@ -321,45 +293,51 @@ def annotate_file(file_path, args):
             args.close_path,
         )
 
-        object_dataset = expand_mask_to_image_shape(object_mask, image_dataset)
-        container_dataset = expand_mask_to_image_shape(container_mask, image_dataset)
-
-        assert_outputs_can_be_written(
-            root,
-            [args.object_mask_dataset, args.container_mask_dataset],
-            args.overwrite,
-        )
-
+    if output_path.exists() and not args.overwrite:
+        raise FileExistsError(f"Output file already exists: {output_path}. Use --overwrite.")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    open_mode = "w" if args.overwrite else "x"
+    with h5py.File(output_path, open_mode) as root:
         write_mask_dataset(
             root,
             args.object_mask_dataset,
-            object_dataset,
-            args.overwrite,
+            object_mask,
             args.compression,
         )
         write_mask_dataset(
             root,
             args.container_mask_dataset,
-            container_dataset,
-            args.overwrite,
+            container_mask,
             args.compression,
         )
+        root.attrs["reference_episode"] = str(reference_episode_path)
+        root.attrs["reference_image_dataset"] = selected_image_dataset
+        root.attrs["reference_frame_index"] = -1 if actual_frame is None else int(actual_frame)
 
-        print(
-            f"  Wrote {args.object_mask_dataset} with shape {object_dataset.shape} "
-            f"and {args.container_mask_dataset} with shape {container_dataset.shape}"
-        )
-        return True
+    print(f"  Wrote shared cam2 region masks to {output_path}")
+    print(f"  {args.object_mask_dataset}: shape {object_mask.shape}")
+    print(f"  {args.container_mask_dataset}: shape {container_mask.shape}")
+    return True
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Create cam2_rgb_aug object/container line masks from clicked keypoints."
+        description="Create one shared cam2_line_masks.h5 from clicked keypoints on a reference episode."
     )
     parser.add_argument(
         "--folder",
         default='/mnt/Ego2Exo/line_straight_random_container_scripted_trimmed_cropped_all',
-        help="Folder containing .h5 files.",
+        help="Dataset folder. Defaults are --reference-episode <folder>/episode_0.h5 and --output <folder>/cam2_line_masks.h5.",
+    )
+    parser.add_argument(
+        "--reference-episode",
+        default=None,
+        help="Episode file used only as the cam2 reference image. Default: <folder>/episode_0.h5",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Output shared mask file. Default: <folder>/cam2_line_masks.h5",
     )
     parser.add_argument(
         "--image-dataset",
@@ -408,7 +386,7 @@ def parse_args():
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Replace existing mask datasets if present.",
+        help="Replace the output cam2_line_masks.h5 file if it already exists.",
     )
     parser.add_argument(
         "--compression",
@@ -446,21 +424,26 @@ def main():
     if args.compression == "none":
         args.compression = None
 
-    h5_files = list_h5_files(args.folder)
-    if not h5_files:
-        print(f"No .h5 files found in {args.folder}")
-        return
+    folder = Path(args.folder).expanduser()
+    reference_episode_path = (
+        Path(args.reference_episode).expanduser()
+        if args.reference_episode is not None
+        else folder / "episode_0.h5"
+    )
+    output_path = (
+        Path(args.output).expanduser()
+        if args.output is not None
+        else folder / "cam2_line_masks.h5"
+    )
 
-    print(f"Found {len(h5_files)} .h5 files in {args.folder}")
-    written = 0
-    for file_path in h5_files:
-        try:
-            if annotate_file(file_path, args):
-                written += 1
-        except Exception as exc:
-            print(f"  Error while processing {file_path}: {exc}")
+    if not reference_episode_path.exists():
+        raise FileNotFoundError(f"Reference episode does not exist: {reference_episode_path}")
 
-    print(f"\nDone. Wrote masks for {written}/{len(h5_files)} files.")
+    wrote = create_shared_cam2_mask_file(reference_episode_path, output_path, args)
+    if wrote:
+        print("\nDone.")
+    else:
+        print("\nNo mask file written.")
 
 
 if __name__ == "__main__":
